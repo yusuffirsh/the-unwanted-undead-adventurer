@@ -1,25 +1,19 @@
 #!/usr/bin/env python3
-"""Re-translate chapters that still contain Japanese text.
-Uses deep_translator's GoogleTranslator (web scraping, different from API)."""
+"""Re-translate chapters using argostranslate (offline, no rate limits)."""
 
 import os
 import re
 import sys
-import time
-from deep_translator import GoogleTranslator
+import argostranslate.translate
 
-RAW_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chapters", "raw")
-EN_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chapters", "en")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RAW_DIR = os.path.join(PROJECT_ROOT, "chapters", "raw")
+EN_DIR = os.path.join(PROJECT_ROOT, "chapters", "en")
 START_CHAPTER = 390
 END_CHAPTER = 515
 
 SERIES_TITLE = "The Unwanted Undead Adventurer"
 JP_PATTERN = re.compile(r'[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff]')
-
-translator = GoogleTranslator(source='ja', target='en')
-
-# deep_translator GoogleTranslator has a 5000 char limit per request
-MAX_CHARS = 4800
 
 
 def needs_retranslation(chapter_num):
@@ -37,73 +31,28 @@ def needs_retranslation(chapter_num):
     return (jp_chars / total) > 0.2
 
 
-def translate_chunk(text):
-    """Translate a chunk of text (max ~5000 chars)."""
+def translate_text(text):
+    """Translate Japanese text to English using argostranslate."""
     if not JP_PATTERN.search(text):
         return text
 
-    for attempt in range(5):
-        try:
-            result = translator.translate(text)
-            return result if result else text
-        except Exception as e:
-            err = str(e)
-            if "429" in err or "Too Many" in err or "rate" in err.lower():
-                wait = 15 * (attempt + 1)
-                print(f"      Rate limited, waiting {wait}s...", flush=True)
-                time.sleep(wait)
-            else:
-                print(f"      Error (attempt {attempt+1}): {err[:80]}", flush=True)
-                time.sleep(3 * (attempt + 1))
-
-    return text
-
-
-def split_text(text, max_chars=MAX_CHARS):
-    """Split text into chunks at paragraph boundaries."""
     paragraphs = text.split("\n\n")
-    chunks = []
-    current = ""
-
-    for para in paragraphs:
-        if len(current) + len(para) + 2 > max_chars:
-            if current:
-                chunks.append(current)
-            # If single paragraph is too long, split by sentences
-            if len(para) > max_chars:
-                sentences = re.split(r'(?<=[。！？」』])', para)
-                sub = ""
-                for s in sentences:
-                    if len(sub) + len(s) > max_chars and sub:
-                        chunks.append(sub)
-                        sub = s
-                    else:
-                        sub += s
-                if sub:
-                    current = sub
-                else:
-                    current = ""
-            else:
-                current = para
-        else:
-            current = current + "\n\n" + para if current else para
-
-    if current:
-        chunks.append(current)
-
-    return chunks if chunks else [text]
-
-
-def translate_text(text):
-    """Translate full text, splitting into chunks as needed."""
-    chunks = split_text(text)
     translated = []
 
-    for i, chunk in enumerate(chunks):
-        result = translate_chunk(chunk)
-        translated.append(result)
-        if i < len(chunks) - 1:
-            time.sleep(0.5)
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        if not JP_PATTERN.search(para):
+            translated.append(para)
+            continue
+
+        try:
+            result = argostranslate.translate.translate(para, "ja", "en")
+            translated.append(result)
+        except Exception as e:
+            print(f"      Translation error: {e}", flush=True)
+            translated.append(para)
 
     return "\n\n".join(translated)
 
@@ -111,6 +60,9 @@ def translate_text(text):
 def retranslate_chapter(chapter_num):
     raw_path = os.path.join(RAW_DIR, f"chapter_{chapter_num}_raw.txt")
     en_path = os.path.join(EN_DIR, f"chapter_{chapter_num}_en.txt")
+
+    if not os.path.exists(raw_path):
+        raise FileNotFoundError(f"Raw file not found: {raw_path}")
 
     with open(raw_path, "r", encoding="utf-8") as f:
         content = f.read()
@@ -123,8 +75,7 @@ def retranslate_chapter(chapter_num):
     jp_title = match.group(1) if match else title_line
 
     # Translate title
-    en_title = translate_chunk(jp_title)
-    time.sleep(0.3)
+    en_title = argostranslate.translate.translate(jp_title, "ja", "en")
 
     # Get body
     body_start = 0
@@ -138,6 +89,7 @@ def retranslate_chapter(chapter_num):
     en_body = translate_text(body_text)
 
     # Write
+    os.makedirs(EN_DIR, exist_ok=True)
     with open(en_path, "w", encoding="utf-8") as f:
         f.write(f"Title: {SERIES_TITLE}\n")
         f.write(f"Chapter: {en_title}\n\n")
@@ -161,16 +113,15 @@ def main():
     success = 0
     failed = []
     for i, ch in enumerate(to_translate):
-        print(f"[{i+1}/{len(to_translate)}] Re-translating chapter {ch}...", flush=True)
+        print(f"[{i+1}/{len(to_translate)}] Translating chapter {ch}...", flush=True)
         try:
             if retranslate_chapter(ch):
                 success += 1
         except Exception as e:
             print(f"  [ERROR] Chapter {ch}: {e}", flush=True)
             failed.append(ch)
-        time.sleep(1)
 
-    print(f"\nDone! {success}/{len(to_translate)} chapters re-translated.", flush=True)
+    print(f"\nDone! {success}/{len(to_translate)} chapters translated.", flush=True)
     if failed:
         print(f"Failed: {failed}", flush=True)
 
